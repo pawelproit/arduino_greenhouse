@@ -1,3 +1,112 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+#include <BH1750.h>
+#include <LiquidCrystal_I2C.h>
+#include "config.h"
+
+Adafruit_BME280 bme280;
+BH1750 bh1750(0x23);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+SensorReadings lastReadings = {0};
+unsigned long lastSensorsUpdateTime = 0;
+int8_t currentModeNumber = 0;
+
+SensorReadings readAllSensors()
+{
+    SensorReadings re = {0};
+
+    // Temperature
+    re.temperature = bme280.readTemperature();
+
+    // Humidity
+    re.humidity = bme280.readHumidity();
+
+    // Pressure
+    re.pressure = bme280.readPressure() / 100.0f;
+
+    // Light intensity
+    while (!bh1750.measurementReady()) {}
+    re.lightIntensity = bh1750.readLightLevel();
+
+    // Soil moisture
+    re.soilMoisture = 100 - map(analogRead(SOIL_MOISTURE_SENSOR_PIN), 0, 1023, 0, 100);
+
+    // Water level
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(5);
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+    long duration = pulseIn(ECHO_PIN, HIGH);
+    int distance = duration * 0.034 / 2;
+    re.waterLevel = 100 - map(distance, 0, WATER_LEVEL_0_PCT_DISTANCE, 0, 100);
+    re.waterLevel = constrain(re.waterLevel, 0, 100);
+
+    return re;
+}
+
+void handleSensors()
+{
+    lastReadings = readAllSensors();
+    GreenhouseModeSettings settings = greenhouseModeSettings[currentModeNumber];
+
+    // Temperature
+    if (lastReadings.temperature <= (settings.temperature * (1.0 - HYSTERESIS_PERCENT)))
+    {
+        RELAY_SET(RELAY_HEATER_PIN, HIGH);
+    }
+    else if (lastReadings.temperature >= (settings.temperature * (1.0 + HYSTERESIS_PERCENT)))
+    {
+        RELAY_SET(RELAY_HEATER_PIN, LOW);
+    }
+
+    // Humidity
+    if (lastReadings.humidity <= (settings.humidity * (1.0 - HYSTERESIS_PERCENT)))
+    {
+        RELAY_SET(RELAY_AIR_HUMIDIFIER_PIN, HIGH);
+        RELAY_SET(RELAY_DEHUMIDIFIER_PIN, LOW);
+    }
+    else if (lastReadings.humidity >= (settings.humidity * (1.0 + HYSTERESIS_PERCENT)))
+    {
+        RELAY_SET(RELAY_AIR_HUMIDIFIER_PIN, LOW);
+        RELAY_SET(RELAY_DEHUMIDIFIER_PIN, HIGH);
+    }
+    else
+    {
+        RELAY_SET(RELAY_AIR_HUMIDIFIER_PIN, LOW);
+        RELAY_SET(RELAY_DEHUMIDIFIER_PIN, LOW);
+    }
+
+    // Light intensity
+    if (lastReadings.lightIntensity <= (settings.lightIntensity * (1.0 - HYSTERESIS_PERCENT)))
+    {
+        RELAY_SET(RELAY_LIGHT_PIN, HIGH);
+    }
+    else if (lastReadings.lightIntensity >= (settings.lightIntensity * (1.0 + HYSTERESIS_PERCENT)))
+    {
+        RELAY_SET(RELAY_LIGHT_PIN, LOW);
+    }
+
+    // Soil moisture
+    if (lastReadings.waterLevel > 10)
+    {
+        if (lastReadings.soilMoisture <= (settings.soilMoisture * (1.0 - HYSTERESIS_PERCENT)))
+        {
+            RELAY_SET(RELAY_WATER_PUMP_PIN, HIGH);
+        }
+        else if (lastReadings.soilMoisture >= (settings.soilMoisture * (1.0 + HYSTERESIS_PERCENT)))
+        {
+            RELAY_SET(RELAY_WATER_PUMP_PIN, LOW);
+        }
+    }
+    else
+    {
+        RELAY_SET(RELAY_WATER_PUMP_PIN, LOW);
+    }
+}
+
 void sendSensorsReadings()
 {
     Serial.print("{");
