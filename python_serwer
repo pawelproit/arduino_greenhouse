@@ -1,0 +1,155 @@
+import serial.tools.list_ports
+
+from flask import Flask, render_template
+import json
+from datetime import datetime
+from waitress import serve
+import threading
+import sqlite3
+
+app = Flask(__name__)
+sem = threading.Semaphore()
+is_running = True
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/getdata')
+def getdata():
+    sem.acquire()
+    data = fetch_data_from_database()
+    sem.release()
+
+    return app.response_class(response=data, status=200, mimetype='application/json')
+
+def arduino_thread(arduino_serial):
+    while is_running:
+        try:
+            data = receive_data(arduino_serial)
+        except Exception as e:
+            print("Serial error:", e)
+            arduino_serial.close()
+            exit()
+
+        json_data = parse_json(data)
+
+        if json_data is not None:
+            sem.acquire()
+            save_to_database(json_data)
+            sem.release()
+
+def select_serial_port():
+    ports = serial.tools.list_ports.comports()
+    print("Select port:")
+
+    for idx, port in enumerate(ports, start=1):
+        print(f"{idx}: {port.device}")
+
+    port_idx = int(input("Port: ")) - 1
+    return ports[port_idx].device
+
+def receive_data(arduino_serial):
+    while is_running:
+        if arduino_serial.in_waiting > 0:
+            data = arduino_serial.readline().decode().strip()
+            return data
+    return None
+
+def parse_json(data):
+    try:
+        json_data = json.loads(data)
+        return json_data
+    except Exception as e:
+        print("JSON error:", e)
+        return None
+
+def fetch_data_from_database():
+    try:
+        conn = sqlite3.connect('sensor_data.db')
+        cursor = conn.cursor()
+
+        cursor.execute('''SELECT temperature, humidity, lightIntensity, soilMoisture, pressure, waterLevel, timestamp 
+                          FROM sensor_data 
+                          ORDER BY timestamp DESC 
+                          LIMIT 50''')
+        rows = cursor.fetchall()
+
+        data_dict = {"temperature": [], "humidity": [], "lightIntensity": [], "soilMoisture": [], "pressure": [], "waterLevel": []}
+
+        for row in rows:
+            temperature = row[0]
+            humidity = row[1]
+            lightIntensity = row[2]
+            soilMoisture = row[3]
+            pressure = row[4]
+            waterLevel = row[5]
+            timestamp = row[6]
+
+            data_dict["temperature"].append({"timestamp": timestamp, "value": temperature})
+            data_dict["humidity"].append({"timestamp": timestamp, "value": humidity})
+            data_dict["lightIntensity"].append({"timestamp": timestamp, "value": lightIntensity})
+            data_dict["soilMoisture"].append({"timestamp": timestamp, "value": soilMoisture})
+            data_dict["pressure"].append({"timestamp": timestamp, "value": pressure})
+            data_dict["waterLevel"].append({"timestamp": timestamp, "value": waterLevel})
+
+        conn.close()
+        return json.dumps(data_dict)
+
+    except sqlite3.Error as e:
+        print("Database error:", e)
+        return None
+
+def save_to_database(data):
+    try:
+        conn = sqlite3.connect('sensor_data.db')
+        cursor = conn.cursor()
+
+        cursor.execute('''CREATE TABLE IF NOT EXISTS sensor_data (
+                            id INTEGER PRIMARY KEY,
+                            temperature REAL,
+                            humidity REAL,
+                            lightIntensity REAL,
+                            soilMoisture REAL,
+                            pressure REAL,
+                            waterLevel REAL,
+                            timestamp TEXT
+                            )''')
+        
+        timestamp = datetime.now().isoformat()
+        
+        cursor.execute('''INSERT INTO sensor_data (
+                            temperature, humidity, lightIntensity, soilMoisture, pressure, waterLevel, timestamp
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?)''', (
+                            data['temperature'], data['humidity'], data['lightIntensity'], data['soilMoisture'],
+                            data['pressure'], data['waterLevel'], timestamp))
+        
+        conn.commit()
+    except sqlite3.Error as e:
+        print("Datatbase error:", e)
+    
+    finally:
+        if conn:
+            conn.close()
+
+def main():
+    global is_running
+    port = select_serial_port()
+
+    try:
+        arduino_serial = serial.Serial(port, 9600)
+    except Exception as e:
+        print("Serial error:", e)
+        exit()
+
+    ard_thr = threading.Thread(target=arduino_thread, args=(arduino_serial,))
+    ard_thr.start()
+
+    app.run()
+
+    is_running = False
+    ard_thr.join()
+    arduino_serial.close()
+
+if __name__ == "__main__":
+    main()
